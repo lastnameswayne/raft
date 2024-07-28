@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 
+	"fmt"
 	"math"
 	"math/rand"
 	"sync"
@@ -79,7 +80,7 @@ const (
 	Candidate       = "candidate"
 )
 
-const ElectionTimeoutMs = 1000 //ms
+const ElectionTimeoutMs = 2000 //ms
 const HeartbeatTimeout = 300   //ms
 
 type Entry struct {
@@ -177,64 +178,56 @@ type AppendEntriesReply struct {
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	fmt.Println("received", rf.me, "from", args.CandidateId)
 	if args.Term < rf.currentTerm {
-		reply = &RequestVoteReply{
-			Term:        rf.currentTerm,
-			VoteGranted: false,
-		}
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
 		return
 	}
 	if args.Term > rf.currentTerm {
+		fmt.Println(rf.me, "converting to follower", args.Term, rf.currentTerm)
 		rf.currentTerm = args.Term
 		//convert to follower
 		rf.state = Follower
-
 	}
 
-	uptoDateLog := len(rf.log)-1 == args.LastLogIndex && rf.log[len(rf.log)-1].Term == args.LastLogTerm
+	// uptoDateLog := len(rf.log)-1 == args.LastLogIndex && rf.log[len(rf.log)-1].Term == args.LastLogTerm
 	alreadyVoted := rf.votedFor == nil || rf.votedFor == &args.CandidateId
-	if alreadyVoted && uptoDateLog {
+	if alreadyVoted {
+		fmt.Println("foting for ", args.CandidateId)
 		rf.votedFor = &args.CandidateId
 		rf.latestCommunication = time.Now()
-		reply = &RequestVoteReply{
-			Term:        rf.currentTerm,
-			VoteGranted: true,
-		}
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = true
 		return
 	}
 
-	reply = &RequestVoteReply{
-		Term:        rf.currentTerm,
-		VoteGranted: false,
-	}
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
 	return
 	// Your code here (3A, 3B).
 }
 
 // example AppendEntries RPC handler.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	fmt.Println("received heartbeat", rf.me, rf.state)
 	isHeartbeat := len(args.Entries) == 0
 	if args.Term < rf.currentTerm {
-		reply = &AppendEntriesReply{
-			Term:    rf.currentTerm,
-			Success: false,
-		}
+		reply.Term = rf.currentTerm
+		reply.Success = false
 		return
 	}
 	if rf.state == Candidate && args.Term >= rf.currentTerm {
 		rf.currentTerm = args.Term
-		rf.state = Candidate
-		reply = &AppendEntriesReply{
-			Term:    rf.currentTerm,
-			Success: false,
-		}
+		rf.state = Follower
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
 	}
 	if isHeartbeat {
 		rf.latestCommunication = time.Now()
-		reply = &AppendEntriesReply{
-			Term:    rf.currentTerm,
-			Success: true,
-		}
+		reply.Term = rf.currentTerm
+		reply.Success = true
 	}
 	return
 	// Your code here (3A, 3B).
@@ -295,6 +288,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
+	index = rf.me
+	term, isLeader = rf.GetState()
 
 	return index, term, isLeader
 }
@@ -324,7 +319,8 @@ func (rf *Raft) ticker() {
 		if isLeader {
 			rf.sendHeartbeats()
 			//send heartbeats
-			return
+			time.Sleep(time.Millisecond * HeartbeatTimeout)
+			continue
 		}
 
 		// Your code here (3A)
@@ -351,7 +347,7 @@ func (rf *Raft) sendHeartbeats() {
 		if i == rf.me {
 			continue
 		}
-		go func() {
+		go func(i int) {
 			req := &AppendEntriesArgs{
 				Term:    rf.currentTerm,
 				Entries: []Entry{},
@@ -359,14 +355,14 @@ func (rf *Raft) sendHeartbeats() {
 			reply := &AppendEntriesReply{}
 			ok := rf.sendAppendEntries(i, req, reply)
 			if !ok {
-				panic("message not received")
+				return
 			}
 
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.state = Follower
 			}
-		}()
+		}(i)
 	}
 }
 
@@ -375,27 +371,29 @@ func (rf *Raft) startElection() bool {
 	rf.votedFor = &rf.me
 	rf.state = Candidate
 	rf.latestCommunication = time.Now()
+	fmt.Println(rf.me, "I am starting to be a candaidate", rf.state, rf.currentTerm)
 
 	voteCount := 0.0
 	for i := range rf.peers {
-		if i != rf.me {
+		if i == rf.me {
 			continue
 		}
-		go func() {
+		go func(i int) {
 			req := &RequestVoteArgs{
 				Term:         rf.currentTerm,
 				CandidateId:  rf.me,
 				LastLogIndex: len(rf.log),
-				LastLogTerm:  rf.log[len(rf.log)-1].Term,
+				// LastLogTerm:  rf.log[len(rf.log)-1].Term,
 			}
 
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(i, req, &reply)
 			if !ok {
-				panic("message not received")
+				return
 			}
 
 			if reply.Term > rf.currentTerm {
+				fmt.Println(rf.me, "term", rf.currentTerm, reply.Term)
 				rf.currentTerm = reply.Term
 				rf.state = Follower
 				return
@@ -404,14 +402,16 @@ func (rf *Raft) startElection() bool {
 			if reply.VoteGranted {
 				voteCount++
 			}
-		}()
+		}(i)
 	}
 
-	time.Sleep(500) //hopefully I have received all replies at this point. Not sure what else the timeout should be
+	time.Sleep(1 * time.Second) //hopefully I have received all replies at this point. Not sure what else the timeout should be
 
 	majority := math.Floor((float64(len(rf.peers)/2) + 1))
+	fmt.Println("votecount", voteCount, "for", rf.me, "in state", rf.state)
 	if voteCount >= majority {
 		if rf.state == Candidate {
+			fmt.Println("FOUND LEADER FOUND LEADER")
 			rf.state = Leader
 		} else {
 			panic("state has to be candidate")
@@ -419,7 +419,6 @@ func (rf *Raft) startElection() bool {
 	}
 
 	return rf.state == Leader
-
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -433,12 +432,14 @@ func (rf *Raft) startElection() bool {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
 	rf.state = Follower
 	rf.latestCommunication = time.Now()
+	rf.log = make([]Entry, 0)
 
 	// Your initialization code here (3A, 3B, 3C).
 

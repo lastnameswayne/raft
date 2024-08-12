@@ -187,13 +187,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		fmt.Println(rf.me, "converting to follower", args.Term, rf.currentTerm)
 		rf.currentTerm = args.Term
+		rf.votedFor = nil
 		//convert to follower
 		rf.state = Follower
 	}
 
 	// uptoDateLog := len(rf.log)-1 == args.LastLogIndex && rf.log[len(rf.log)-1].Term == args.LastLogTerm
+	fmt.Println("me", rf.me, "voted for", rf.votedFor)
 	alreadyVoted := rf.votedFor == nil || rf.votedFor == &args.CandidateId
 	if alreadyVoted {
+		//WHY IS IT NOT VOTING AFTER THE DISCONNECT
 		fmt.Println("foting for ", args.CandidateId)
 		rf.votedFor = &args.CandidateId
 		rf.latestCommunication = time.Now()
@@ -374,6 +377,7 @@ func (rf *Raft) startElection() bool {
 	fmt.Println(rf.me, "I am starting to be a candaidate", rf.state, rf.currentTerm)
 
 	voteCount := 0.0
+	responseCount := 0.0
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -392,6 +396,8 @@ func (rf *Raft) startElection() bool {
 				return
 			}
 
+			responseCount++
+
 			if reply.Term > rf.currentTerm {
 				fmt.Println(rf.me, "term", rf.currentTerm, reply.Term)
 				rf.currentTerm = reply.Term
@@ -407,8 +413,8 @@ func (rf *Raft) startElection() bool {
 
 	time.Sleep(1 * time.Second) //hopefully I have received all replies at this point. Not sure what else the timeout should be
 
-	majority := math.Floor((float64(len(rf.peers)/2) + 1))
-	fmt.Println("votecount", voteCount, "for", rf.me, "in state", rf.state)
+	majority := math.Floor((responseCount / 2) + 1)
+	fmt.Println("votecount", voteCount, "for", rf.me, "in state", rf.state, "and I need ", majority, "votes")
 	if voteCount >= majority {
 		if rf.state == Candidate {
 			fmt.Println("FOUND LEADER FOUND LEADER")

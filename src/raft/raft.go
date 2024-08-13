@@ -234,8 +234,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // example AppendEntries RPC handler.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	fmt.Println("received appendEntries", rf.me, rf.state, "with log", len(args.Entries), args.Entries, args.PrevLogIndex, args.PrevLogTerm)
-	fmt.Println("current term", args.Term, "my term", args.Term, "my logs", rf.log)
+	fmt.Println("received appendEntries", rf.me, rf.state, "with log", len(args.Entries), args.PrevLogIndex, args.PrevLogTerm)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -269,9 +268,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
-	fmt.Println("HERE HERE HERE", rf.me)
 	conflictIndex, isConflict := findConflictingEntries(rf.log, args.Entries)
-	fmt.Println("conflict entry", conflictIndex, isConflict)
 	if isConflict {
 		//delete logs conflictIndex and later
 		rf.log = rf.log[:conflictIndex]
@@ -282,13 +279,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		newEntriesIndexStart++
 	}
 	newEntries := args.Entries[newEntriesIndexStart:]
-	fmt.Println(rf.me, "my logs before", rf.log)
 	rf.log = append(rf.log, newEntries...)
-	fmt.Println("my", rf.me, "logs are now", rf.log)
+	fmt.Println("my", rf.me, "logs are now", len(rf.log))
 	if args.LeaderCommitIndex > rf.commitIndex {
 		rf.commitIndex = int(math.Min(float64(args.LeaderCommitIndex), float64(len(rf.log)-1)))
 	}
-	fmt.Println(rf.me, "my log is ", rf.log)
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
@@ -409,9 +404,7 @@ func (rf *Raft) ticker() {
 		_, isLeader := rf.GetState()
 		if isLeader {
 			newLogsToBeApplied := len(rf.log) > rf.commitIndex-1
-			fmt.Println(rf.me, rf.log, rf.commitIndex)
 			if newLogsToBeApplied {
-				fmt.Println("sending logs", rf.me, len(rf.log), rf.commitIndex, rf.log)
 				rf.sendLogs()
 			} else {
 				rf.sendHeartbeats()
@@ -492,7 +485,6 @@ func (rf *Raft) sendLogs() {
 	time.Sleep(500 * time.Millisecond)
 	majority := math.Floor((float64(responseCount / 2)) + 1)
 	if float64(successCount) >= majority {
-		fmt.Println("my log is", rf.log)
 		rf.sendApplyMsgs()
 	}
 }
@@ -509,7 +501,7 @@ func (rf *Raft) sendApplyMsgs() {
 		}
 		rf.applyCh <- applyMsg
 		rf.commitIndex = rf.lastAppliedIndex
-		fmt.Println(rf.me, "sent applymsg", applyMsg)
+		fmt.Println(rf.me, "sent applymsg", applyMsg.CommandIndex)
 	}
 
 }
@@ -519,7 +511,6 @@ func findPrevLogIndexAndTerm(lastAppliedIndex int, log []Entry) (int, int) {
 		lastAppliedIndex = lastAppliedIndex - 1
 	}
 	prevLogIndex := lastAppliedIndex
-	fmt.Println("last applied index", lastAppliedIndex, "log", log)
 	prevLogTerm := log[prevLogIndex].Term
 	return prevLogIndex, prevLogTerm
 }

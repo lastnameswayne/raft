@@ -234,7 +234,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 // example AppendEntries RPC handler.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	fmt.Println("received appendEntries", rf.me, rf.state, "with log", len(args.Entries), args.PrevLogIndex, args.PrevLogTerm)
+	fmt.Println("received appendEntries", rf.me, rf.state, "with log", args.Entries, args.PrevLogIndex, args.PrevLogTerm)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -274,13 +274,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.log = rf.log[:conflictIndex]
 	}
 
-	newEntriesIndexStart := args.PrevLogIndex
-	if len(rf.log) > 0 {
-		newEntriesIndexStart++
-	}
-	newEntries := args.Entries[newEntriesIndexStart:]
-	rf.log = append(rf.log, newEntries...)
-	fmt.Println("my", rf.me, "logs are now", len(rf.log))
+	fmt.Println("my", rf.me, "logs are before", rf.log)
+	rf.log = append(rf.log, args.Entries...)
+	fmt.Println("my", rf.me, "logs are now", rf.log)
 	if args.LeaderCommitIndex > rf.commitIndex {
 		rf.commitIndex = int(math.Min(float64(args.LeaderCommitIndex), float64(len(rf.log)-1)))
 	}
@@ -436,21 +432,27 @@ func (rf *Raft) ticker() {
 func (rf *Raft) sendLogs() {
 	successCount := 0
 	responseCount := 0
+	fmt.Println(rf.me, "sending logs", rf.log)
 
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		nextIndex := rf.nextIndex[i]
-		if len(rf.log)-1 < nextIndex {
+		if len(rf.log) < nextIndex {
+			fmt.Println(nextIndex, rf.log)
 			continue
 		}
 		go func(i int) {
-			prevLogIndex, prevLogTerm := findPrevLogIndexAndTerm(rf.lastAppliedIndex, rf.log)
-			fmt.Println("sending ", prevLogIndex)
+			nextIndex := rf.nextIndex[i]
+			prevLogIndex := int(math.Max(float64(nextIndex-1), 0))
+			prevLogTerm := rf.log[prevLogIndex].Term
+
+			entriesToSend := rf.log[nextIndex:]
+			fmt.Println("sending ", prevLogIndex, nextIndex, entriesToSend)
 			req := &AppendEntriesArgs{
 				Term:              rf.currentTerm,
-				Entries:           rf.log,
+				Entries:           entriesToSend,
 				LeaderId:          rf.me,
 				LeaderCommitIndex: rf.commitIndex,
 				PrevLogIndex:      prevLogIndex,
@@ -469,10 +471,11 @@ func (rf *Raft) sendLogs() {
 			}
 
 			if reply.Success {
-				fmt.Println(rf.me, "received success response from", i)
+				fmt.Println(rf.me, "received success response from", i, (prevLogIndex)+len(req.Entries))
 				//update
-				rf.nextIndex[i] = len(req.Entries)
-				rf.matchIndex[i] = req.PrevLogIndex + len(req.Entries)
+
+				rf.nextIndex[i] = nextIndex + len(req.Entries)
+				rf.matchIndex[i] = prevLogIndex + len(req.Entries) - 1
 				successCount++
 				return
 			}
@@ -512,6 +515,7 @@ func findPrevLogIndexAndTerm(lastAppliedIndex int, log []Entry) (int, int) {
 	}
 	prevLogIndex := lastAppliedIndex
 	prevLogTerm := log[prevLogIndex].Term
+	fmt.Println(prevLogIndex, lastAppliedIndex, log)
 	return prevLogIndex, prevLogTerm
 }
 

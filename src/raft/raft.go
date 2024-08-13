@@ -399,7 +399,7 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		_, isLeader := rf.GetState()
 		if isLeader {
-			newLogsToBeApplied := len(rf.log) > rf.commitIndex-1
+			newLogsToBeApplied := len(rf.log) > int(math.Max(float64(rf.commitIndex-1), 0))
 			if newLogsToBeApplied {
 				rf.sendLogs()
 			} else {

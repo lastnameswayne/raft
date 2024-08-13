@@ -8,12 +8,14 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -1267,4 +1269,8 @@ func TestSnapshotInit3D(t *testing.T) {
 	// do another op to trigger potential bug
 	cfg.one(rand.Int(), servers, true)
 	cfg.end()
+}
+
+func test_findPrevLogIndexAndTerm(t *testing.T) {
+
 }

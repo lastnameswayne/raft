@@ -68,8 +68,7 @@ type Raft struct {
 	votedFor    *int
 	log         []Entry
 
-	state               State
-	latestCommunication time.Time //with any peer
+	state State
 
 	//volatile state on all servers
 	commitIndex      int
@@ -80,6 +79,11 @@ type Raft struct {
 	matchIndex []int
 
 	applyCh chan ApplyMsg
+
+	winElectCh  chan bool
+	stepDownCh  chan bool
+	grantVoteCh chan bool
+	heartbeatCh chan bool
 }
 
 type State string
@@ -192,6 +196,9 @@ type AppendEntriesReply struct {
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
 	fmt.Println("received REQUEST VOTE", rf.me, "from", args.CandidateId, "with last log index", args.LastLogIndex)
 	if rf.killed() {
 		reply.Term = -1
@@ -205,10 +212,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	if args.Term > rf.currentTerm {
 		fmt.Println(rf.me, "converting to follower", args.Term, rf.currentTerm)
-		rf.currentTerm = args.Term
-		rf.votedFor = nil
-		//convert to follower
-		rf.state = Follower
+		rf.convertToFollower(args.Term)
 	}
 
 	if args.LastLogIndex > 0 {
@@ -224,9 +228,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if alreadyVoted {
 		fmt.Println("voting for ", args.CandidateId)
 		rf.votedFor = &args.CandidateId
-		rf.latestCommunication = time.Now()
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
+		rf.sendToChannel(rf.grantVoteCh, true)
 		return
 	}
 
@@ -252,14 +256,25 @@ func (rf *Raft) isLogUpToDate(candidateLastLogIndex int, candidateLastLogTerm in
 	return candidateLastLogIndex >= lastLogIndex
 }
 
+func (rf *Raft) convertToFollower(term int) {
+	state := rf.state
+	rf.state = Follower
+	rf.currentTerm = term
+	rf.votedFor = nil
+	// step down if not follower, this check is needed
+	// to prevent race where state is already follower
+	if state != Follower {
+		rf.sendToChannel(rf.stepDownCh, true)
+	}
+
+}
+
 // example AppendEntries RPC handler.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	fmt.Println("I", rf.me, "received appendEntries from someone who thinks its term", args.Term, rf.state, "with log", args.Entries, args.PrevLogIndex, args.PrevLogTerm)
-	if rf.killed() {
-		reply.Term = -1
-		reply.Success = false
-		return
-	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	fmt.Println("I", rf.me, rf.currentTerm, "received appendEntries from someone who thinks its term", args.Term, rf.state, "with log", args.Entries, args.PrevLogIndex, args.PrevLogTerm)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -267,15 +282,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// node is a candidate and finds another candidate with a higher term
-	if rf.state == Candidate && args.Term >= rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.state = Follower
-		reply.Term = rf.currentTerm
-		reply.Success = false
-		return
+	if args.Term > rf.currentTerm {
+		rf.convertToFollower(args.Term)
 	}
 
-	rf.latestCommunication = time.Now()
+	rf.sendToChannel(rf.heartbeatCh, true)
 	isHeartbeat := len(args.Entries) == 0
 	if isHeartbeat {
 		fmt.Println("received heartbeat", rf.me, rf.state)
@@ -415,7 +426,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	rf.latestCommunication = time.Now()
 }
 
 func (rf *Raft) killed() bool {
@@ -425,36 +435,52 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-		_, isLeader := rf.GetState()
-		if isLeader {
-			newLogsToBeApplied := len(rf.log) > int(math.Max(float64(rf.commitIndex), 0))
-			if newLogsToBeApplied {
-				rf.sendLogs()
-			} else {
-				fmt.Println("leader sending heartbeats", rf.me)
-				rf.sendHeartbeats()
+		rf.mu.Lock()
+		state := rf.state
+		rf.mu.Unlock()
+		switch state {
+		case Leader:
+			select {
+			case <-rf.stepDownCh:
+			case <-time.After(120 * time.Millisecond):
+				rf.mu.Lock()
+				newLogsToBeApplied := len(rf.log) > int(math.Max(float64(rf.commitIndex), 0))
+				if newLogsToBeApplied {
+					rf.sendLogs()
+				} else {
+					fmt.Println("leader sending heartbeats", rf.me, "term", rf.currentTerm)
+					rf.sendHeartbeats()
+				}
+				rf.mu.Unlock()
 			}
-			time.Sleep(time.Millisecond * HeartbeatTimeout)
-			continue
-		}
 
-		// Your code here (3A)
-		// Check if a leader election should be started.
-
-		//if the election timeout window has passed and nothing happens, start election.
-		//so we need to reset the election timeout on every communcation
-		if time.Since(rf.latestCommunication).Milliseconds() > ElectionTimeoutMs {
-			fmt.Println("I", rf.me, "IS STARTING ELECTION", rf.latestCommunication, time.Since(rf.latestCommunication).Milliseconds())
-			nodeBecameLeader := rf.startElection()
-			if nodeBecameLeader {
-				rf.sendHeartbeats()
+		case Follower:
+			select {
+			case <-rf.grantVoteCh:
+			case <-rf.heartbeatCh:
+			case <-time.After(time.Duration(360+rand.Intn(240)) * time.Millisecond):
+				rf.startElection()
 			}
-		}
+		case Candidate:
+			select {
+			case <-rf.stepDownCh:
+			case <-rf.winElectCh:
+				fmt.Println("CONVERTING TO ELADER")
+				rf.convertToLeader()
+			case <-time.After(time.Duration(360+rand.Intn(240)) * time.Millisecond):
+				rf.startElection()
+			}
 
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+			// Your code here (3A)
+			// Check if a leader election should be started.
+
+			//if the election timeout window has passed and nothing happens, start election.
+			//so we need to reset the election timeout on every communcation
+
+			// pause for a random amount of time between 50 and 350
+			// milliseconds.
+
+		}
 	}
 }
 
@@ -489,16 +515,17 @@ func (rf *Raft) sendLogs() {
 				PrevLogTerm:       prevLogTerm,
 			}
 			reply := &AppendEntriesReply{}
+
 			ok := rf.sendAppendEntries(i, req, reply)
 			if !ok {
 				fmt.Println("APPEND ENTRIES FAILED FOR", i)
 				return
 			}
+
 			responseCount++
 
 			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.state = Follower
+				rf.convertToFollower(reply.Term)
 				fmt.Println("I", rf.me, "have been demoted to follower")
 				return
 			}
@@ -510,6 +537,13 @@ func (rf *Raft) sendLogs() {
 				rf.nextIndex[i] = nextIndex + len(req.Entries)
 				rf.matchIndex[i] = prevLogIndex + len(req.Entries) - 1
 				successCount++
+				majority := math.Floor((float64(responseCount / 2)) + 1)
+				if float64(successCount) >= majority {
+					rf.mu.Lock()
+					rf.sendApplyMsgs()
+					rf.mu.Unlock()
+				}
+
 				return
 			}
 
@@ -519,18 +553,6 @@ func (rf *Raft) sendLogs() {
 		}(i)
 	}
 
-	go func() {
-		if rf.killed() {
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
-		majority := math.Floor((float64(responseCount / 2)) + 1)
-		if float64(successCount) >= majority {
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			rf.sendApplyMsgs()
-		}
-	}()
 }
 
 func (rf *Raft) sendApplyMsgs() {
@@ -548,17 +570,10 @@ func (rf *Raft) sendApplyMsgs() {
 
 }
 
-func findPrevLogIndexAndTerm(lastAppliedIndex int, log []Entry) (int, int) {
-	if lastAppliedIndex > 0 {
-		lastAppliedIndex = lastAppliedIndex - 1
-	}
-	prevLogIndex := lastAppliedIndex
-	prevLogTerm := log[prevLogIndex].Term
-	fmt.Println(prevLogIndex, lastAppliedIndex, log)
-	return prevLogIndex, prevLogTerm
-}
-
 func (rf *Raft) sendHeartbeats() {
+	if rf.state != Leader {
+		return
+	}
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -574,27 +589,62 @@ func (rf *Raft) sendHeartbeats() {
 				fmt.Println("I", rf.me, rf.state, "FAILED TO SEND APPEND ENTRIES TO", i)
 				return
 			}
+			if rf.state != Leader || req.Term != rf.currentTerm || reply.Term < rf.currentTerm {
+				return
+			}
 
+			fmt.Println("I", rf.me, "received message from", i, "with term", reply.Term, "and I think its term", rf.currentTerm)
 			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.state = Follower
+				rf.convertToFollower(reply.Term)
 			}
 		}(i)
 	}
 }
 
-func (rf *Raft) startElection() bool {
+func (rf *Raft) resetChannels() {
+	rf.winElectCh = make(chan bool)
+	rf.stepDownCh = make(chan bool)
+	rf.grantVoteCh = make(chan bool)
+	rf.heartbeatCh = make(chan bool)
+}
+
+func (rf *Raft) convertToLeader() {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// this check is needed to prevent race
+	// while waiting on multiple channels
+	if rf.state != Candidate {
+		return
+	}
+
+	rf.resetChannels()
+	rf.state = Leader
+	nextIndex := make([]int, len(rf.peers))
+	for idx := range rf.peers {
+		nextIndex[idx] = len(rf.log)
+	}
+	rf.nextIndex = nextIndex
+	rf.matchIndex = make([]int, len(rf.peers))
+	rf.sendHeartbeats()
+}
+
+func (rf *Raft) convertToCandidate() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.resetChannels()
 	rf.currentTerm = rf.currentTerm + 1
 	rf.votedFor = &rf.me
 	rf.state = Candidate
-	rf.latestCommunication = time.Now()
-
 	fmt.Println(rf.me, "I am starting to be a candaidate", rf.state, rf.currentTerm)
+}
+
+func (rf *Raft) startElection() {
+	rf.convertToCandidate()
 
 	voteCount := 0.0
 	responseCount := 0.0
-	rf.mu.Unlock()
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -617,49 +667,32 @@ func (rf *Raft) startElection() bool {
 				return
 			}
 
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			responseCount++
 
 			if reply.Term > rf.currentTerm {
 				fmt.Println(rf.me, "SOMEONE HAS HIGHER TERM THAN ME", rf.currentTerm, reply.Term)
-				rf.currentTerm = reply.Term
-				rf.state = Follower
+				rf.convertToFollower(reply.Term)
 				return
 			}
 
 			if reply.VoteGranted {
 				voteCount++
+				majority := math.Floor((responseCount / 2) + 1)
+				if voteCount >= majority {
+					rf.sendToChannel(rf.winElectCh, true)
+				}
 			}
 		}(i)
 	}
+}
 
-	go func() {
-		if rf.killed() {
-			return
-		}
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		time.Sleep(1 * time.Second) //hopefully I have received all replies at this point. Not sure what else the timeout should be
-
-		majority := math.Floor((responseCount / 2) + 1)
-		fmt.Println("votecount", voteCount, "for", rf.me, "in state", rf.state, "and I need ", majority, "votes")
-		if voteCount >= majority {
-			if rf.state == Candidate {
-				fmt.Println("FOUND LEADER FOUND LEADER", rf.me, "with log", rf.log)
-				rf.state = Leader
-
-				nextIndex := make([]int, len(rf.peers))
-				for idx := range rf.peers {
-					nextIndex[idx] = len(rf.log)
-				}
-				rf.nextIndex = nextIndex
-				rf.matchIndex = make([]int, len(rf.peers))
-			} else {
-				panic("state has to be candidate")
-			}
-		}
-	}()
-
-	return rf.state == Leader
+func (rf *Raft) sendToChannel(ch chan bool, value bool) {
+	select {
+	case ch <- value:
+	default:
+	}
 }
 
 // the service or tester wants to create a Raft server. the ports
@@ -679,11 +712,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.state = Follower
-	rf.latestCommunication = time.Now()
 	rf.log = make([]Entry, 0)
 	rf.commitIndex = 0
 	rf.lastAppliedIndex = 0
 	rf.applyCh = applyCh
+	rf.winElectCh = make(chan bool)
+	rf.stepDownCh = make(chan bool)
+	rf.grantVoteCh = make(chan bool)
+	rf.heartbeatCh = make(chan bool)
 
 	// Your initialization code here (3A, 3B, 3C).
 

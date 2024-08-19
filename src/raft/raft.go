@@ -321,7 +321,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func findConflictingEntries(log []Entry, leaderLogs []Entry, prevLogIndex int) (int, bool) {
-	if len(leaderLogs) == 0 {
+	if len(leaderLogs) == 0 || prevLogIndex == 0 {
 		return 0, false
 	}
 	for i := prevLogIndex + 1; i < len(log); i++ {

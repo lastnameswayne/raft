@@ -234,10 +234,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if alreadyVoted {
 		fmt.Println("voting for ", args.CandidateId)
 		rf.votedFor = args.CandidateId
+		rf.persist()
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
 		rf.sendToChannel(rf.grantVoteCh, true)
-		rf.persist()
 		return
 	}
 
@@ -268,12 +268,12 @@ func (rf *Raft) convertToFollower(term int) {
 	rf.state = Follower
 	rf.currentTerm = term
 	rf.votedFor = -1
+	rf.persist()
 	// step down if not follower, this check is needed
 	// to prevent race where state is already follower
 	if state != Follower {
 		rf.sendToChannel(rf.stepDownCh, true)
 	}
-	rf.persist()
 
 }
 
@@ -319,13 +319,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 	reply.Term = rf.currentTerm
 	rf.log = append(rf.log, args.Entries...)
+	rf.persist()
 	fmt.Println("my", rf.me, "logs are now", rf.log)
 	fmt.Println("my", rf.me, "leader", args.LeaderCommitIndex, rf.commitIndex)
 	if args.LeaderCommitIndex > rf.commitIndex {
 		rf.commitIndex = int(math.Min(float64(args.LeaderCommitIndex), float64(len(rf.log)-1)))
-		rf.persist()
 		go rf.sendApplyMsgs()
-		rf.persist()
 	}
 
 }
@@ -598,7 +597,6 @@ func (rf *Raft) convertToLeader() {
 	}
 	rf.nextIndex = nextIndex
 	rf.matchIndex = make([]int, len(rf.peers))
-	rf.persist()
 	rf.sendLogs()
 }
 
@@ -609,8 +607,8 @@ func (rf *Raft) convertToCandidate() {
 	rf.resetChannels()
 	rf.currentTerm = rf.currentTerm + 1
 	rf.votedFor = rf.me
-	rf.state = Candidate
 	rf.persist()
+	rf.state = Candidate
 	fmt.Println(rf.me, "I am starting to be a candaidate", rf.state, rf.currentTerm)
 }
 

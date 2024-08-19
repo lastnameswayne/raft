@@ -20,6 +20,7 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"fmt"
 	"math"
 	"math/rand"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -65,7 +67,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	currentTerm int
-	votedFor    *int
+	votedFor    int
 	log         []Entry
 
 	state State
@@ -125,12 +127,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -140,17 +143,20 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (3C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []Entry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+		panic("ERRROR")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.log = log
+		rf.votedFor = votedFor
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -224,13 +230,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	fmt.Println("me", rf.me, "voted for", rf.votedFor)
-	alreadyVoted := rf.votedFor == nil || rf.votedFor == &args.CandidateId
+	alreadyVoted := rf.votedFor == -1 || rf.votedFor == args.CandidateId
 	if alreadyVoted {
 		fmt.Println("voting for ", args.CandidateId)
-		rf.votedFor = &args.CandidateId
+		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
 		rf.sendToChannel(rf.grantVoteCh, true)
+		rf.persist()
 		return
 	}
 
@@ -260,12 +267,13 @@ func (rf *Raft) convertToFollower(term int) {
 	state := rf.state
 	rf.state = Follower
 	rf.currentTerm = term
-	rf.votedFor = nil
+	rf.votedFor = -1
 	// step down if not follower, this check is needed
 	// to prevent race where state is already follower
 	if state != Follower {
 		rf.sendToChannel(rf.stepDownCh, true)
 	}
+	rf.persist()
 
 }
 
@@ -315,7 +323,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	fmt.Println("my", rf.me, "leader", args.LeaderCommitIndex, rf.commitIndex)
 	if args.LeaderCommitIndex > rf.commitIndex {
 		rf.commitIndex = int(math.Min(float64(args.LeaderCommitIndex), float64(len(rf.log)-1)))
+		rf.persist()
 		go rf.sendApplyMsgs()
+		rf.persist()
 	}
 
 }
@@ -417,6 +427,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		fmt.Println(rf.me, "FAILED, decrementing nextindex for ", server)
 		rf.nextIndex[server] = rf.nextIndex[server] - 1
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		rf.persist()
 	}
 
 	//failed
@@ -451,6 +462,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, Entry{Term: rf.currentTerm, Command: command})
 	term = rf.currentTerm
 	index = len(rf.log)
+	rf.persist()
 
 	return index - 1, term, true
 }
@@ -586,6 +598,7 @@ func (rf *Raft) convertToLeader() {
 	}
 	rf.nextIndex = nextIndex
 	rf.matchIndex = make([]int, len(rf.peers))
+	rf.persist()
 	rf.sendLogs()
 }
 
@@ -595,8 +608,9 @@ func (rf *Raft) convertToCandidate() {
 
 	rf.resetChannels()
 	rf.currentTerm = rf.currentTerm + 1
-	rf.votedFor = &rf.me
+	rf.votedFor = rf.me
 	rf.state = Candidate
+	rf.persist()
 	fmt.Println(rf.me, "I am starting to be a candaidate", rf.state, rf.currentTerm)
 }
 

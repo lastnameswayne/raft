@@ -15,6 +15,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // The tester generously allows solutions to complete elections in one second
@@ -1271,6 +1273,24 @@ func TestSnapshotInit3D(t *testing.T) {
 	cfg.end()
 }
 
-func test_findPrevLogIndexAndTerm(t *testing.T) {
+func Test_findConflictingEntries(t *testing.T) {
+	entries := []Entry{
+		{Command: 0, Term: 0},
+		{Command: 101, Term: 1},
+		{Command: 102, Term: 1},
+		{Command: 103, Term: 1},
+		{Command: 104, Term: 1},
+		{Command: 104, Term: 1},
+	}
+
+	leaderLogs := []Entry{
+		{Command: 103, Term: 2},
+	}
+
+	// Call the function with the test entries
+	conflictingIndex, isConflict := findConflictingEntries(entries, leaderLogs, 1)
+
+	assert.True(t, isConflict)
+	assert.Equal(t, 2, conflictingIndex)
 
 }

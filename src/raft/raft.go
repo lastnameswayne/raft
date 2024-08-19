@@ -287,57 +287,51 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	rf.sendToChannel(rf.heartbeatCh, true)
-	isHeartbeat := len(args.Entries) == 0
-	if isHeartbeat {
-		fmt.Println("received heartbeat", rf.me, rf.state)
+	lastIndex := len(rf.log) - 1
+	if args.PrevLogIndex > lastIndex {
 		reply.Term = rf.currentTerm
-		reply.Success = true
+		reply.Success = false
 		return
 	}
 
-	if args.PrevLogIndex != -1 {
-		entry := rf.log[args.PrevLogIndex]
-		if entry.Term != args.PrevLogTerm {
-			reply.Term = rf.currentTerm
-			reply.Success = false
-			return
-		}
-	}
-
-	conflictIndex, isConflict := findConflictingEntries(rf.log, args.Entries)
-	if isConflict {
-		//delete logs conflictIndex and later
-		rf.log = rf.log[:conflictIndex]
+	entry := rf.log[args.PrevLogIndex]
+	if entry.Term != args.PrevLogTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
 	}
 
 	fmt.Println("my", rf.me, "logs are before", rf.log)
-	rf.log = append(rf.log, args.Entries...)
-	fmt.Println("my", rf.me, "logs are now", rf.log)
-	if args.LeaderCommitIndex > rf.commitIndex {
-		rf.commitIndex = int(math.Min(float64(args.LeaderCommitIndex), float64(len(rf.log)-1)))
+	conflictIndex, isConflict := findConflictingEntries(rf.log, args.Entries, args.PrevLogIndex)
+	if isConflict {
+		fmt.Println("found confflict", conflictIndex, rf.log, args.Entries)
+		rf.log = rf.log[:conflictIndex]
 	}
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
+	rf.log = append(rf.log, args.Entries...)
+	fmt.Println("my", rf.me, "logs are now", rf.log)
+	fmt.Println("my", rf.me, "leader", args.LeaderCommitIndex, rf.commitIndex)
+	if args.LeaderCommitIndex > rf.commitIndex {
+		rf.commitIndex = int(math.Min(float64(args.LeaderCommitIndex), float64(len(rf.log)-1)))
+		go rf.sendApplyMsgs()
+	}
 
-	rf.sendApplyMsgs()
-
-	return
-	// Your code here (3A, 3B).
 }
 
-func findConflictingEntries(log []Entry, leaderLogs []Entry) (int, bool) {
-	i := 0
-	for i < len(log) && i < len(leaderLogs) {
-		time.Sleep(10 * time.Millisecond)
+func findConflictingEntries(log []Entry, leaderLogs []Entry, prevLogIndex int) (int, bool) {
+	if len(leaderLogs) == 0 {
+		return 0, false
+	}
+	for i := prevLogIndex + 1; i < len(log); i++ {
 		existingEntry := log[i]
-		newEntry := leaderLogs[i]
+		newEntry := leaderLogs[i-prevLogIndex-1]
 
 		isConflict := existingEntry.Term != newEntry.Term
 		if isConflict {
 			return i, true
 		}
-		i++
 	}
 
 	return 0, false
@@ -376,9 +370,56 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+	if !ok {
+		fmt.Println("APPEND ENTRIES FAILED FOR", server)
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if reply.Term > rf.currentTerm {
+		rf.convertToFollower(reply.Term)
+		fmt.Println("I", rf.me, "have been demoted to follower")
+		return
+	}
+
+	if reply.Success {
+		fmt.Println(rf.me, "received success response from", server)
+		//update
+		newMatchIndex := args.PrevLogIndex + len(args.Entries)
+		fmt.Println("new matchindex", newMatchIndex, "old", rf.matchIndex[server])
+		if newMatchIndex > rf.matchIndex[server] {
+			rf.matchIndex[server] = newMatchIndex
+		}
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+
+		for n := len(rf.log) - 1; n >= rf.commitIndex; n-- {
+			count := 1
+			if rf.log[n].Term == rf.currentTerm {
+				for i := 0; i < len(rf.peers); i++ {
+					if i != rf.me && rf.matchIndex[i] >= n {
+						count++
+					}
+				}
+			}
+			majority := math.Floor((float64(len(rf.peers) / 2)) + 1)
+			if count >= int(majority) {
+				rf.commitIndex = n
+				fmt.Println("commitindex is now", rf.commitIndex)
+				go rf.sendApplyMsgs()
+				break
+			}
+		}
+
+	} else {
+		fmt.Println(rf.me, "FAILED, decrementing nextindex for ", server)
+		rf.nextIndex[server] = rf.nextIndex[server] - 1
+		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+	}
+
+	//failed
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -399,7 +440,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
-	term, isLeader = rf.GetState()
+	_, isLeader = rf.GetState()
 	if !isLeader || rf.killed() {
 		return -1, -1, false
 	}
@@ -411,7 +452,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	term = rf.currentTerm
 	index = len(rf.log)
 
-	return index, term, isLeader
+	return index - 1, term, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -444,13 +485,7 @@ func (rf *Raft) ticker() {
 			case <-rf.stepDownCh:
 			case <-time.After(120 * time.Millisecond):
 				rf.mu.Lock()
-				newLogsToBeApplied := len(rf.log) > int(math.Max(float64(rf.commitIndex), 0))
-				if newLogsToBeApplied {
-					rf.sendLogs()
-				} else {
-					fmt.Println("leader sending heartbeats", rf.me, "term", rf.currentTerm)
-					rf.sendHeartbeats()
-				}
+				rf.sendLogs()
 				rf.mu.Unlock()
 			}
 
@@ -485,120 +520,45 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) sendLogs() {
-	successCount := 0
-	responseCount := 0
 	fmt.Println(rf.me, "sending logs", rf.log, "term", rf.currentTerm)
-
-	for i := range rf.peers {
-		if i == rf.me {
-			continue
-		}
-		nextIndex := rf.nextIndex[i]
-		if len(rf.log) < nextIndex {
-			fmt.Println(nextIndex, rf.log)
-			continue
-		}
-		go func(i int) {
-			nextIndex := rf.nextIndex[i]
-			previndex2 := nextIndex - 1
-			prevLogIndex := int(math.Max(float64(nextIndex-1), 0))
-			prevLogTerm := rf.log[prevLogIndex].Term
-
-			entriesToSend := rf.log[nextIndex:]
-			fmt.Println(rf.me, rf.state, "sending to", i, prevLogIndex, nextIndex, entriesToSend)
-			req := &AppendEntriesArgs{
-				Term:              rf.currentTerm,
-				Entries:           entriesToSend,
-				LeaderId:          rf.me,
-				LeaderCommitIndex: rf.commitIndex,
-				PrevLogIndex:      previndex2,
-				PrevLogTerm:       prevLogTerm,
-			}
-			reply := &AppendEntriesReply{}
-
-			ok := rf.sendAppendEntries(i, req, reply)
-			if !ok {
-				fmt.Println("APPEND ENTRIES FAILED FOR", i)
-				return
-			}
-
-			responseCount++
-
-			if reply.Term > rf.currentTerm {
-				rf.convertToFollower(reply.Term)
-				fmt.Println("I", rf.me, "have been demoted to follower")
-				return
-			}
-
-			if reply.Success {
-				fmt.Println(rf.me, "received success response from", i, (prevLogIndex)+len(req.Entries))
-				//update
-
-				rf.nextIndex[i] = nextIndex + len(req.Entries)
-				rf.matchIndex[i] = prevLogIndex + len(req.Entries) - 1
-				successCount++
-				majority := math.Floor((float64(responseCount / 2)) + 1)
-				if float64(successCount) >= majority {
-					rf.mu.Lock()
-					rf.sendApplyMsgs()
-					rf.mu.Unlock()
-				}
-
-				return
-			}
-
-			//failed
-			fmt.Println(rf.me, "FAILED, decrementing nextindex for ", i)
-			rf.nextIndex[i] = len(req.Entries) - 1
-		}(i)
-	}
-
-}
-
-func (rf *Raft) sendApplyMsgs() {
-	for rf.lastAppliedIndex < len(rf.log) {
-		rf.lastAppliedIndex++
-		applyMsg := ApplyMsg{
-			CommandValid: true,
-			Command:      rf.log[rf.lastAppliedIndex-1].Command,
-			CommandIndex: rf.lastAppliedIndex,
-		}
-		rf.applyCh <- applyMsg
-		rf.commitIndex = rf.lastAppliedIndex
-		fmt.Println(rf.me, "sent applymsg", applyMsg.CommandIndex, applyMsg, "and my logs are", rf.log)
-	}
-
-}
-
-func (rf *Raft) sendHeartbeats() {
 	if rf.state != Leader {
 		return
 	}
+
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		go func(i int) {
-			req := &AppendEntriesArgs{
-				Term:    rf.currentTerm,
-				Entries: []Entry{},
-			}
-			reply := &AppendEntriesReply{}
-			ok := rf.sendAppendEntries(i, req, reply)
-			if !ok {
-				fmt.Println("I", rf.me, rf.state, "FAILED TO SEND APPEND ENTRIES TO", i)
-				return
-			}
-			if rf.state != Leader || req.Term != rf.currentTerm || reply.Term < rf.currentTerm {
-				return
-			}
+		entriesToSend := rf.log[rf.nextIndex[i]:]
+		fmt.Println(rf.me, rf.state, "sending to", i, rf.nextIndex[i], entriesToSend)
+		req := &AppendEntriesArgs{
+			Term:              rf.currentTerm,
+			Entries:           entriesToSend,
+			LeaderId:          rf.me,
+			LeaderCommitIndex: rf.commitIndex,
+			PrevLogIndex:      rf.nextIndex[i] - 1,
+		}
+		req.PrevLogTerm = rf.log[req.PrevLogIndex].Term
+		reply := &AppendEntriesReply{}
 
-			fmt.Println("I", rf.me, "received message from", i, "with term", reply.Term, "and I think its term", rf.currentTerm)
-			if reply.Term > rf.currentTerm {
-				rf.convertToFollower(reply.Term)
-			}
-		}(i)
+		go rf.sendAppendEntries(i, req, reply)
 	}
+}
+
+func (rf *Raft) sendApplyMsgs() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	for i := rf.lastAppliedIndex + 1; i <= rf.commitIndex; i++ {
+		rf.applyCh <- ApplyMsg{
+			CommandValid: true,
+			Command:      rf.log[i].Command,
+			CommandIndex: i,
+		}
+		fmt.Println("I", rf.me, "applied message", i, rf.log[i].Command)
+		rf.lastAppliedIndex = i
+	}
+
 }
 
 func (rf *Raft) resetChannels() {
@@ -626,7 +586,7 @@ func (rf *Raft) convertToLeader() {
 	}
 	rf.nextIndex = nextIndex
 	rf.matchIndex = make([]int, len(rf.peers))
-	rf.sendHeartbeats()
+	rf.sendLogs()
 }
 
 func (rf *Raft) convertToCandidate() {
@@ -713,6 +673,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.state = Follower
 	rf.log = make([]Entry, 0)
+	rf.log = append(rf.log, Entry{Term: 0})
 	rf.commitIndex = 0
 	rf.lastAppliedIndex = 0
 	rf.applyCh = applyCh

@@ -107,7 +107,8 @@ type Entry struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	var term int
 	var isleader bool
 	// Your code here (3A).
@@ -129,11 +130,12 @@ func (rf *Raft) persist() {
 	// Example:
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	if e.Encode(rf.currentTerm) != nil ||
+		e.Encode(rf.votedFor) != nil || e.Encode(rf.log) != nil {
+		panic("failed to encode raft persistent state")
+	}
+	data := w.Bytes()
+	rf.persister.Save(data, nil)
 }
 
 // restore previously persisted state.
@@ -204,6 +206,7 @@ type AppendEntriesReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	fmt.Println("received REQUEST VOTE", rf.me, "from", args.CandidateId, "with last log index", args.LastLogIndex)
 	if rf.killed() {
@@ -220,30 +223,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		fmt.Println(rf.me, "converting to follower", args.Term, rf.currentTerm)
 		rf.convertToFollower(args.Term)
 	}
-
-	if args.LastLogIndex > 0 {
-		if !rf.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
-			reply.Term = rf.currentTerm
-			reply.VoteGranted = false
-			return
-		}
-	}
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
 
 	fmt.Println("me", rf.me, "voted for", rf.votedFor)
 	alreadyVoted := rf.votedFor == -1 || rf.votedFor == args.CandidateId
-	if alreadyVoted {
+	if alreadyVoted && rf.isLogUpToDate(args.LastLogIndex, args.LastLogTerm) {
 		fmt.Println("voting for ", args.CandidateId)
 		rf.votedFor = args.CandidateId
-		rf.persist()
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
 		rf.sendToChannel(rf.grantVoteCh, true)
 		return
 	}
-
-	reply.Term = rf.currentTerm
-	reply.VoteGranted = false
-	return
 	// Your code here (3A, 3B).
 }
 
@@ -268,7 +260,6 @@ func (rf *Raft) convertToFollower(term int) {
 	rf.state = Follower
 	rf.currentTerm = term
 	rf.votedFor = -1
-	rf.persist()
 	// step down if not follower, this check is needed
 	// to prevent race where state is already follower
 	if state != Follower {
@@ -281,6 +272,7 @@ func (rf *Raft) convertToFollower(term int) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	fmt.Println("I", rf.me, rf.currentTerm, "received appendEntries from someone who thinks its term", args.Term, rf.state, "with log", args.Entries, args.PrevLogIndex, args.PrevLogTerm)
 	if args.Term < rf.currentTerm {
@@ -319,7 +311,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 	reply.Term = rf.currentTerm
 	rf.log = append(rf.log, args.Entries...)
-	rf.persist()
 	fmt.Println("my", rf.me, "logs are now", rf.log)
 	fmt.Println("my", rf.me, "leader", args.LeaderCommitIndex, rf.commitIndex)
 	if args.LeaderCommitIndex > rf.commitIndex {
@@ -387,9 +378,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	if reply.Term > rf.currentTerm {
 		rf.convertToFollower(reply.Term)
+		rf.persist()
 		fmt.Println("I", rf.me, "have been demoted to follower")
 		return
 	}
@@ -426,7 +419,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		fmt.Println(rf.me, "FAILED, decrementing nextindex for ", server)
 		rf.nextIndex[server] = rf.nextIndex[server] - 1
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-		rf.persist()
 	}
 
 	//failed
@@ -505,7 +497,7 @@ func (rf *Raft) ticker() {
 			case <-rf.grantVoteCh:
 			case <-rf.heartbeatCh:
 			case <-time.After(time.Duration(360+rand.Intn(240)) * time.Millisecond):
-				rf.startElection()
+				rf.startElection(rf.state)
 			}
 		case Candidate:
 			select {
@@ -514,7 +506,7 @@ func (rf *Raft) ticker() {
 				fmt.Println("CONVERTING TO ELADER")
 				rf.convertToLeader()
 			case <-time.After(time.Duration(360+rand.Intn(240)) * time.Millisecond):
-				rf.startElection()
+				rf.startElection(rf.state)
 			}
 
 			// Your code here (3A)
@@ -601,31 +593,35 @@ func (rf *Raft) convertToLeader() {
 }
 
 func (rf *Raft) convertToCandidate() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	rf.resetChannels()
 	rf.currentTerm = rf.currentTerm + 1
 	rf.votedFor = rf.me
-	rf.persist()
 	rf.state = Candidate
+	rf.persist()
 	fmt.Println(rf.me, "I am starting to be a candaidate", rf.state, rf.currentTerm)
 }
 
-func (rf *Raft) startElection() {
-	rf.convertToCandidate()
+func (rf *Raft) startElection(state State) {
 
-	voteCount := 0.0
-	responseCount := 0.0
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if state != rf.state {
+		return
+	}
+
+	rf.convertToCandidate()
+	if rf.state != Candidate {
+		return
+	}
+
+	voteCount := 1
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 		go func(i int) {
 			var lastLogTerm = 0
-			if len(rf.log) > 0 {
-				lastLogTerm = rf.log[len(rf.log)-1].Term
-			}
+			lastLogTerm = rf.log[len(rf.log)-1].Term
 			req := &RequestVoteArgs{
 				Term:         rf.currentTerm,
 				CandidateId:  rf.me,
@@ -641,18 +637,18 @@ func (rf *Raft) startElection() {
 
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
-			responseCount++
 
 			if reply.Term > rf.currentTerm {
 				fmt.Println(rf.me, "SOMEONE HAS HIGHER TERM THAN ME", rf.currentTerm, reply.Term)
 				rf.convertToFollower(reply.Term)
+				rf.persist()
 				return
 			}
 
 			if reply.VoteGranted {
 				voteCount++
-				majority := math.Floor((responseCount / 2) + 1)
-				if voteCount >= majority {
+				majority := math.Floor((float64(len(rf.peers) / 2)) + 1)
+				if voteCount >= int(majority) {
 					rf.sendToChannel(rf.winElectCh, true)
 				}
 			}
@@ -680,6 +676,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 
 	rf := &Raft{}
+	rf.persister = persister
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me

@@ -251,6 +251,7 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, randomkeys bool) {
 						if j > 0 {
 							o := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j-1) + " y"
 							if !inHistory(o, l) {
+								fmt.Println("l is", l)
 								t.Fatalf("error: old %v not in return\n%v\n", o, l)
 							}
 						}

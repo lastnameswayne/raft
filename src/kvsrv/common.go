@@ -8,6 +8,7 @@ type PutAppendArgs struct {
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 	OperationID string
+	ClientID    int
 }
 
 type PutAppendReply struct {

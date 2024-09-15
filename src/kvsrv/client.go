@@ -11,6 +11,7 @@ import (
 type Clerk struct {
 	server *labrpc.ClientEnd
 	// You will have to modify this struct.
+	serverId int64
 }
 
 func nrand() int64 {
@@ -23,6 +24,7 @@ func nrand() int64 {
 func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.server = server
+	ck.serverId = nrand()
 	// You'll have to add code here.
 	return ck
 }
@@ -65,7 +67,7 @@ func (ck *Clerk) Get(key string) string {
 
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	// You will have to modify this function.
-	req := PutAppendArgs{Key: key, Value: value, OperationID: key + fmt.Sprint(nrand())}
+	req := PutAppendArgs{Key: key, Value: value, OperationID: fmt.Sprint(nrand()), ClientID: int(ck.serverId)}
 	reply := PutAppendReply{}
 	ok := false
 	for {

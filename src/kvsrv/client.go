@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"sync"
 
 	"6.5840/labrpc"
 )
@@ -12,6 +13,8 @@ type Clerk struct {
 	server *labrpc.ClientEnd
 	// You will have to modify this struct.
 	serverId int64
+	nextOpID int64
+	mu       sync.Mutex
 }
 
 func nrand() int64 {
@@ -25,6 +28,7 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.server = server
 	ck.serverId = nrand()
+	ck.nextOpID = 0
 	// You'll have to add code here.
 	return ck
 }
@@ -64,10 +68,16 @@ func (ck *Clerk) Get(key string) string {
 // the types of args and reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
-
+func (ck *Clerk) getNextReqID() int64 {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	id := ck.nextOpID
+	ck.nextOpID++
+	return id
+}
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	// You will have to modify this function.
-	req := PutAppendArgs{Key: key, Value: value, OperationID: fmt.Sprint(nrand()), ClientID: int(ck.serverId)}
+	req := PutAppendArgs{Key: key, Value: value, OperationID: int(ck.getNextReqID()), ClientID: fmt.Sprint(ck.serverId)}
 	reply := PutAppendReply{}
 	ok := false
 	for {

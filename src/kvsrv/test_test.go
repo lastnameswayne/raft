@@ -245,7 +245,7 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, randomkeys bool) {
 				}
 				nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 				if (rand.Int() % 1000) < 500 {
-					//log.Printf("%d: client new append %v\n", cli, nv)
+					// log.Printf("%d: client new append %v\n", cli, nv)
 					l := Append(cfg, myck, key, nv, opLog, cli)
 					if !randomkeys {
 						if j > 0 {
@@ -256,6 +256,7 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, randomkeys bool) {
 							}
 						}
 						if inHistory(nv, l) {
+							fmt.Println("nv is", nv, "l is", l)
 							t.Fatalf("error: new value %v in returned values\n%v\n", nv, l)
 						}
 						last = NextValue(last, nv)
@@ -271,6 +272,7 @@ func GenericTest(t *testing.T, nclients int, unreliable bool, randomkeys bool) {
 					v := Get(cfg, myck, key, opLog, cli)
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
+						fmt.Println("key last v", key, last, v)
 						t.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
 					}
 				}
@@ -351,7 +353,7 @@ func TestUnreliableOneKey2(t *testing.T) {
 			nv := "x " + strconv.Itoa(me) + " " + strconv.Itoa(n) + " y"
 			ov := Append(cfg, myck, "k", nv, nil, -1)
 			n++
-			// log.Printf("%d: append nv %v ov %v\n", me, nv, ov)
+			log.Printf("%d: append nv %v ov %v\n", me, nv, ov)
 			if inHistory(nv, ov) {
 				t.Fatalf("error: nv %v in returned values\n%v\n", nv, ov)
 			}
@@ -455,6 +457,7 @@ func TestMemAppend2(t *testing.T) {
 	runtime.ReadMemStats(&st)
 	m := st.HeapAlloc / MiB
 	if m > 3*MEM {
+		fmt.Println("m is", m, "gerater than", 3*MEM)
 		t.Fatalf("error: server using too much memory %d\n", m)
 	}
 	cfg.end()

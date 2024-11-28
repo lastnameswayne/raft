@@ -200,6 +200,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	XTerm   int // term in the conflicting entry (if any)
+	XIndex  int // index of first entry with that term (if any)
+	XLen    int // log length
 }
 
 // example RequestVote RPC handler.
@@ -291,6 +294,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > lastIndex {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		// reply.XIndex = lastIndex
 		return
 	}
 
@@ -298,6 +302,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if entry.Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		// reply.XTerm = entry.Term
 		return
 	}
 
@@ -310,7 +315,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Success = true
 	reply.Term = rf.currentTerm
-	rf.log = append(rf.log, args.Entries...)
+
+	if len(rf.log) > args.PrevLogIndex+1 {
+		overwriteOwnLogs := rf.log[:args.PrevLogIndex+1]
+		rf.log = append(overwriteOwnLogs, args.Entries...)
+	} else {
+		rf.log = append(rf.log, args.Entries...)
+	}
 	fmt.Println("my", rf.me, "logs are now", rf.log)
 	fmt.Println("my", rf.me, "leader", args.LeaderCommitIndex, rf.commitIndex)
 	if args.LeaderCommitIndex > rf.commitIndex {
@@ -414,7 +425,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 				break
 			}
 		}
-
 	} else {
 		fmt.Println(rf.me, "FAILED, decrementing nextindex for ", server)
 		rf.nextIndex[server] = rf.nextIndex[server] - 1

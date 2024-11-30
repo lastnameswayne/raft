@@ -294,7 +294,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > lastIndex {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		// reply.XIndex = lastIndex
+		reply.XIndex = lastIndex
+		reply.XLen = len(rf.log)
 		return
 	}
 
@@ -302,7 +303,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if entry.Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
-		// reply.XTerm = entry.Term
+		reply.XTerm = entry.Term
+		reply.XIndex = findFirstIndexWithTerm(entry.Term, rf.log)
+		reply.XLen = len(rf.log)
 		return
 	}
 
@@ -347,6 +350,15 @@ func findConflictingEntries(log []Entry, leaderLogs []Entry, prevLogIndex int) (
 
 	return 0, false
 
+}
+
+func findFirstIndexWithTerm(term int, log []Entry) int {
+	for i, log := range log {
+		if log.Term == term {
+			return i
+		}
+	}
+	return 0
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -427,11 +439,41 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		}
 	} else {
 		fmt.Println(rf.me, "FAILED, decrementing nextindex for ", server)
-		rf.nextIndex[server] = rf.nextIndex[server] - 1
+		// Upon receiving a conflict response, the leader should first search its log for conflictTerm.
+		//If it finds an entry in its log with that term, it should set nextIndex to be the one beyond the index
+		//of the last entry in that term in its log.
+		// If it does not find an entry with that term, it should set nextIndex = conflictIndex.
+		if logHasTerm(reply.XTerm, rf.log) {
+			indexOfLastEntryWithTerm := findLastIndexInLogWithTerm(reply.XTerm, rf.log)
+			rf.nextIndex[server] = indexOfLastEntryWithTerm + 1
+		} else {
+			rf.nextIndex[server] = reply.XIndex
+		}
 		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
 	}
 
 	//failed
+}
+
+func logHasTerm(term int, log []Entry) bool {
+	for _, l := range log {
+		if l.Term == term {
+			return true
+		}
+	}
+	return false
+}
+
+func findLastIndexInLogWithTerm(term int, log []Entry) int {
+	//only use this if you know the log has that term
+	end := len(log) - 1
+	for end >= 0 {
+		if log[end].Term == term {
+			return end
+		}
+		end--
+	}
+	return 0
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
